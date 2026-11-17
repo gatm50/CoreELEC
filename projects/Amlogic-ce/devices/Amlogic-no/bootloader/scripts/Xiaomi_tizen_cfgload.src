@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Explicit Tizen choice for the verified 10 GiB USB layout.
+if test "${device}" = "usb"; then
+  if test "${loadaddr_kernel}" != ""; then setenv loadaddr_kernel "0x02000000"; setenv loadaddr "${loadaddr_kernel}"; fi
+  if fatload usb ${devnr}:1 ${loadaddr} tizen/kernel.img; then
+    if fatload usb ${devnr}:1 ${dtb_mem_addr} tizen/dtb.img; then
+      setenv rootopt "xiaomi_boot=tizen root=PARTUUID=26c11205-05 rootfstype=ext4 rootwait rw security=smack lsm=lockdown,yama,integrity,smack systemd.unit=multi-user.target"
+      setenv consoleopt "console=tty0 no_console_suspend loglevel=7 systemd.show_status=1"
+      setenv irsetup "remotewakeup=0xffffffff decode_type=0 remotewakeupmask=0xffffffff"
+      setenv displayopt "vout=1080p60hz,dis frac_rate_policy=0 hdmitx=${hdmitx} hdr_policy=1"
+      if test "${initrd_high}" != ""; then setenv logoaddr "logo_addr=${initrd_high}"; fi
+      if test "${mac}" = "" && test "${ethaddr}" != ""; then setenv localmac "mac=${ethaddr}"; fi
+      setenv bootargs "${bootargs} ${rootopt} ${consoleopt} keymap=us ${localmac} ${irsetup} ${logoaddr} ${displayopt}"
+      bootm ${loadaddr}
+      if bootm start ${loadaddr}; then
+        if bootm loados; then
+          if bootm prep; then bootm go; fi
+        fi
+      fi
+    fi
+  fi
+fi
+echo "Xiaomi Tizen USB did not boot"
+test 0 = 1

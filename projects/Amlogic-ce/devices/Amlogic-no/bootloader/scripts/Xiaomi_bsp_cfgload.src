@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Experimental Tizen-capable kernel with its matching CoreELEC SYSTEM.
+if test "${device}" = "usb"; then
+  if test "${loadaddr_kernel}" != ""; then setenv loadaddr_kernel "0x02000000"; setenv loadaddr "${loadaddr_kernel}"; fi
+  if fatload usb ${devnr}:1 ${loadaddr} experimental/kernel.img; then
+    if fatload usb ${devnr}:1 ${dtb_mem_addr} experimental/dtb.img; then
+      setenv rootopt "BOOT_IMAGE=experimental/kernel.img SYSTEM_IMAGE=experimental/SYSTEM boot=UUID=3A70-EC21 disk=UUID=79ede7e7-5558-4490-885e-2937d33fb57e"
+      setenv consoleopt "console=tty0 no_console_suspend"
+      setenv irsetup "remotewakeup=0xffffffff decode_type=0 remotewakeupmask=0xffffffff"
+      setenv displayopt "vout=1080p60hz,dis frac_rate_policy=0 hdmitx=${hdmitx} hdr_policy=1"
+      if test "${initrd_high}" != ""; then setenv logoaddr "logo_addr=${initrd_high}"; fi
+      if test "${mac}" = "" && test "${ethaddr}" != ""; then setenv localmac "mac=${ethaddr}"; fi
+      setenv bootargs "${bootargs} ${rootopt} ${consoleopt} keymap=us ${localmac} ${irsetup} ${logoaddr} ${displayopt}"
+      bootm ${loadaddr}
+      if bootm start ${loadaddr}; then
+        if bootm loados; then
+          if bootm prep; then bootm go; fi
+        fi
+      fi
+    fi
+  fi
+fi
+echo "Xiaomi experimental BSP USB did not boot"
+test 0 = 1

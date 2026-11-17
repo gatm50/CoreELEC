@@ -1,0 +1,154 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Called by the CoreELEC initramfs after /dev, /proc, /sys and /run exist.
+set -u
+bb=/usr/bin/busybox
+boot_uuid=3A70-EC21
+disk_signature=26c11205
+release=tizen-unified_20251024.151443
+verify_only=no
+case "${1:-}" in
+    --verify-only) verify_only=yes ;;
+    '') test "$$" -eq 1 || exit 2 ;;
+    *) exit 2 ;;
+esac
+
+buffer=/run/xiaomi-tizen-early.log
+flash_ready=no
+flash_path=/flash
+if [ "${verify_only}" = no ]; then
+    umask 077
+    : > "${buffer}"
+fi
+
+record() {
+    printf 'xiaomi-tizen: %s\n' "$*"
+    if [ "${verify_only}" = no ]; then
+        printf '%s %s\n' "$("${bb}" cut -d' ' -f1 /proc/uptime)" "$*" >> "${buffer}"
+    fi
+}
+
+save_logs() {
+    [ "${flash_ready}" = yes ] || return 0
+    "${bb}" tail -c 65536 "${buffer}" > "${flash_path}/BOOTLOG/early.log"
+    "${bb}" dmesg | "${bb}" tail -c 131072 > "${flash_path}/BOOTLOG/kernel.log"
+    "${bb}" sync
+}
+
+fail() {
+    record "STOP: $*"
+    save_logs
+    if [ "${verify_only}" = yes ]; then exit 1; fi
+    # Keep PID 1 alive for HDMI/serial diagnosis. Recovery is selected on the PC.
+    while :; do
+        "${bb}" setsid "${bb}" cttyhack "${bb}" sh
+        "${bb}" sleep 5
+    done
+}
+
+discover_usb() {
+    boot_device=
+    disk_path=
+    for entry in /sys/class/block/*; do
+        [ -f "${entry}/partition" ] || continue
+        [ "$("${bb}" cat "${entry}/partition")" -eq 1 ] || continue
+        path=$("${bb}" readlink -f "${entry}") || continue
+        case "${path}" in */usb[0-9]*/*) ;; *) continue ;; esac
+        name=${entry##*/}
+        # Initramfs ash resolves its built-in blkid applet. The live CoreELEC
+        # userspace supplies the equivalent util-linux command for verification.
+        identity=$(blkid "/dev/${name}" 2>/dev/null) || continue
+        case "${identity}" in *" UUID=\"${boot_uuid}\""*) ;; *) continue ;; esac
+        [ -z "${boot_device}" ] || fail 'Multiple USB partitions match the boot UUID'
+        boot_device=/dev/${name}
+        disk_path=${path%/*}
+    done
+    [ -n "${boot_device}" ]
+}
+
+partition() {
+    number=$1
+    expected_start=$2
+    expected_size=$3
+    found=
+    for entry in /sys/class/block/*; do
+        [ -f "${entry}/partition" ] || continue
+        [ "$("${bb}" cat "${entry}/partition")" -eq "${number}" ] || continue
+        path=$("${bb}" readlink -f "${entry}") || continue
+        [ "${path%/*}" = "${disk_path}" ] || continue
+        [ -z "${found}" ] || return 1
+        [ "$("${bb}" cat "${entry}/start")" -eq "${expected_start}" ] || return 1
+        [ "$("${bb}" cat "${entry}/size")" -eq "${expected_size}" ] || return 1
+        found=/dev/${entry##*/}
+    done
+    [ -n "${found}" ] || return 1
+    printf '%s\n' "${found}"
+}
+
+record 'Entered Xiaomi USB bootstrap'
+attempt=0
+while ! discover_usb; do
+    attempt=$((attempt + 1))
+    [ "${attempt}" -lt 30 ] || fail 'USB discovery timed out'
+    "${bb}" sleep 1
+done
+disk_device=/dev/${disk_path##*/}
+signature=$("${bb}" hexdump -s 440 -n 4 -e '1/4 "%08x"' "${disk_device}") || fail 'Cannot read USB disk signature'
+[ "${signature}" = "${disk_signature}" ] || fail 'USB disk signature differs from the selected layout'
+boot_check=$(partition 1 2048 2097152) || fail 'Boot partition layout differs'
+[ "${boot_check}" = "${boot_device}" ] || fail 'Boot partition identity differs'
+root_device=$(partition 5 2101248 8388608) || fail 'Root partition layout differs'
+data_device=$(partition 6 10491904 2097152) || fail 'System-data partition layout differs'
+hal_device=$(partition 7 12591104 1048576) || fail 'HAL partition layout differs'
+modules_device=$(partition 8 13641728 1048576) || fail 'Modules partition layout differs'
+storage_device=$(partition 9 14692352 2097152) || fail 'Rescue storage partition layout differs'
+user_device=$(partition 10 16791552 4179968) || fail 'User partition layout differs'
+record "USB discovery complete: ${disk_device}, signature ${signature}, boot ${boot_device}"
+record "Resolved root=${root_device} system-data=${data_device} hal=${hal_device} modules=${modules_device} rescue=${storage_device} user=${user_device}"
+if [ "${verify_only}" = yes ]; then
+    record 'Verified USB identities and offsets without mounting or writing filesystems'
+    exit 0
+fi
+
+"${bb}" mount -t vfat -o rw,nosuid,nodev,noexec,umask=0077 "${boot_device}" /flash || fail 'Cannot mount USB boot partition for logs'
+flash_ready=yes
+"${bb}" mkdir -p /flash/BOOTLOG || fail 'Cannot create boot log directory'
+for name in early kernel; do
+    if [ -f "/flash/BOOTLOG/${name}.log" ]; then
+        "${bb}" tail -c 131072 "/flash/BOOTLOG/${name}.log" > "/flash/BOOTLOG/${name}.previous.log"
+    fi
+done
+record 'USB boot log mounted'
+save_logs
+
+cmdline=$("${bb}" cat /proc/cmdline)
+case " ${cmdline} " in *' root=PARTUUID=26c11205-05 '*) ;; *) fail 'Unexpected root command line' ;; esac
+"${bb}" mkdir -p /sys/kernel/security
+"${bb}" mount -t securityfs securityfs /sys/kernel/security || fail 'Cannot mount securityfs'
+active_lsm=$("${bb}" cat /sys/kernel/security/lsm) || fail 'Cannot read active LSMs'
+case ",${active_lsm}," in *,smack,*) ;; *) fail 'SMACK is not active' ;; esac
+record "Active LSMs: ${active_lsm}"
+
+"${bb}" mount -t ext4 -o ro "${root_device}" /sysroot || fail 'Root mount failed'
+[ "$("${bb}" cat /sysroot/etc/xiaomi-usb-release 2>/dev/null)" = "${release}" ] || fail 'Root payload lacks its audited USB provisioning marker'
+[ -x /sysroot/usr/lib/systemd/systemd ] || fail 'Tizen systemd is missing'
+record "Read-only root identity verified: ${release}"
+save_logs
+"${bb}" mount -o remount,rw "${root_device}" /sysroot || fail 'Root writable remount failed'
+"${bb}" mkdir -p /sysroot/opt /sysroot/hal /sysroot/lib/modules /sysroot/boot /sysroot/run /sysroot/dev /sysroot/proc /sysroot/sys
+"${bb}" mount -t ext4 -o rw "${data_device}" /sysroot/opt || fail 'System-data mount failed'
+"${bb}" mkdir -p /sysroot/opt/usr
+"${bb}" mount -t ext4 -o ro "${hal_device}" /sysroot/hal || fail 'HAL mount failed'
+"${bb}" mount -t ext4 -o ro "${modules_device}" /sysroot/lib/modules || fail 'Modules mount failed'
+"${bb}" mount -t f2fs -o rw "${user_device}" /sysroot/opt/usr || fail 'User mount failed'
+[ -f "/sysroot/lib/modules/$("${bb}" uname -r)/modules.dep" ] || fail 'Matching module dependency index is missing'
+record 'Root, system-data, HAL, modules and user filesystems mounted from the verified USB'
+"${bb}" cat /proc/mounts >> "${buffer}"
+record 'Handing root to Tizen systemd in multi-user mode'
+save_logs
+"${bb}" mount --move /flash /sysroot/boot || fail 'Boot mount move failed'
+flash_path=/sysroot/boot
+for name in dev proc sys run; do
+    "${bb}" mount --move "/${name}" "/sysroot/${name}" || fail "Cannot move /${name} to the new root"
+done
+exec "${bb}" switch_root /sysroot /usr/lib/systemd/systemd --unit=multi-user.target

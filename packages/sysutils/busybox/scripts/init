@@ -27,6 +27,11 @@
 # /run options have to match what systemd uses by default
 /usr/bin/busybox mount -t tmpfs -o mode=755,size=20%,nr_inodes=800k,nosuid,nodev,strictatime tmpfs /run
 
+# Explicit USB-only Tizen entry. The ordinary CoreELEC path continues below.
+case " $(/usr/bin/busybox cat /proc/cmdline) " in
+  *" xiaomi_boot=tizen "*) exec /usr/bin/busybox sh /xiaomi-tizen-init ;;
+esac
+
 UPDATE_ROOT=/storage/.update
 UPDATE_DIR="$UPDATE_ROOT"
 
