@@ -18,6 +18,7 @@ pre_make_target() {
 
 make_target() {
   kernel_make -C $(kernel_path) M=${PKG_BUILD}/drivers \
+    CONFIG_AMLOGIC_MEDIA_V4L_DEC=m \
     CONFIG_AMLOGIC_MEDIA_VDEC_MPEG2_MULTI=m \
     CONFIG_AMLOGIC_MEDIA_VDEC_MPEG4_MULTI=m \
     CONFIG_AMLOGIC_MEDIA_VDEC_VC1=m \
